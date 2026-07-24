@@ -193,6 +193,7 @@ async def main():
                 step = "open";   await gripper_call(gripper.open)
                 step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
                 step = "grab";   got = await gripper_call(gripper.grab)
+                await asyncio.sleep(2.0)   # let the jaws finish closing before any motion
                 step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
                 print(json.dumps({"picked": color, "grab_ack": bool(got)}))
             except Exception as e:
