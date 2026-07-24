@@ -49,6 +49,9 @@ X_RANGE = (-350, 350)
 Y_RANGE = (250, 600)
 Z_RANGE = (40, 300)   # TCP floor: fingertips extend ~55mm below TCP; 40 keeps them off the table
 
+SORT_TARGETS = {"red": "left", "blue": "right"}   # sort: each color to its slot
+SORTED_TOL_MM = 40         # block within this distance of its slot counts as sorted
+
 SLOTS = {   # world-frame place positions; verify/adjust with `place`-hover once
     "left":   (-180.0, 445.0),
     "middle": (0.0,    445.0),
@@ -190,6 +193,66 @@ async def go_home(robot):
     await arm.move_to_joint_positions(JointPositions(values=vals))
 
 
+async def pick_color(robot, gripper, color):
+    """Full staged pick. Returns True if grab reported holding."""
+    found = await blocks_of_color(robot, color)
+    if found is None:
+        print(f"color '{color}' not configured (have: {list(COLOR_SEGMENTERS)})"); return False
+    if not found:
+        print(f"no {color} block visible"); return False
+    b = found[0]
+    cal = load_calibration()
+    if await detection_clipped(robot, color):
+        print("  block is partly out of view — coarse estimate only, refine pass will fix it")
+    tx, ty = b["x"] - cal["dx"], b["y"] - cal["dy"]
+    await move_to(robot, tx, ty, REFINE_TCP_Z, "refine-view")
+    refined = await blocks_of_color(robot, color)
+    if refined:
+        if await detection_clipped(robot, color):
+            print("  WARNING: still clipped after refine — nudge the block toward table center and retry")
+        b = refined[0]
+        tx, ty = b["x"] - cal["dx"], b["y"] - cal["dy"]
+        print(f"  refined position: ({b['x']},{b['y']}) -> corrected ({tx:.0f},{ty:.0f})")
+    else:
+        print("  (refine saw nothing; using coarse estimate)")
+    grasp_z = cal["grasp_tcp_z"]
+    print(f"picking {color}: target ({tx:.0f},{ty:.0f}), grasp TCP z={grasp_z}")
+    step = "?"
+    try:
+        step = "open";   await gripper_open(gripper)
+        step = "hover";  await move_to(robot, tx, ty, grasp_z + HOVER_MM, "hover")
+        step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
+        step = "grab";   got = await gripper_grab(gripper)
+        step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
+        print(json.dumps({"picked": color, "grab_ack": bool(got)}))
+        return True
+    except Exception as e:
+        msg = str(e)
+        print(json.dumps({"pick_failed_at": step, "error": msg[:160]}))
+        if "overcurrent" in msg or "collision" in msg:
+            print("collision stop — arm needs: python calibrate.py clear, then retreat manually or rerun")
+        else:
+            print("retreating to safe height...")
+            try:
+                await move_to(robot, tx, ty, REFINE_TCP_Z, "retreat")
+            except Exception:
+                print("  (retreat also failed — clear error and jog from CONTROL tab)")
+        return False
+
+
+async def place_slot(robot, gripper, slot):
+    """Carry held block to a named slot and release gently."""
+    x, y = SLOTS[slot]
+    cal = load_calibration()
+    release_z = cal["grasp_tcp_z"] + 30
+    print(f"placing at {slot} ({x},{y}), release TCP z={release_z}")
+    await move_to(robot, x, y, release_z + HOVER_MM, "hover")
+    await move_to(robot, x, y, release_z, "lower", straight=True)
+    await gripper_open(gripper)
+    await move_to(robot, x, y, release_z + LIFT_MM, "retreat", straight=True)
+    print(json.dumps({"placed": slot}))
+
+
 async def main():
     args = sys.argv[1:]
     cmd = args[0] if args else "help"
@@ -206,65 +269,31 @@ async def main():
 
         elif cmd == "pick":
             color = args[1] if len(args) > 1 else "red"
-            found = await blocks_of_color(robot, color)
-            if found is None:
-                print(f"color '{color}' not configured (have: {list(COLOR_SEGMENTERS)})"); return
-            if not found:
-                print(f"no {color} block visible"); return
-            b = found[0]
-            cal = load_calibration()
-            if await detection_clipped(robot, color):
-                print("  block is partly out of view — coarse estimate only, refine pass will fix it")
+            await pick_color(robot, gripper, color)
 
-            # refine pass: center the camera above the coarse estimate, re-detect from safe altitude
-            tx, ty = b["x"] - cal["dx"], b["y"] - cal["dy"]
-            await move_to(robot, tx, ty, REFINE_TCP_Z, "refine-view")
-            refined = await blocks_of_color(robot, color)
-            if refined:
-                if await detection_clipped(robot, color):
-                    print("  WARNING: still clipped after refine — nudge the block toward table center and retry")
-                b = refined[0]
-                tx, ty = b["x"] - cal["dx"], b["y"] - cal["dy"]
-                print(f"  refined position: ({b['x']},{b['y']}) -> corrected ({tx:.0f},{ty:.0f})")
-            else:
-                print("  (refine saw nothing; using coarse estimate)")
-
-            grasp_z = cal["grasp_tcp_z"]   # TCP height where fingertips straddle a table block
-            print(f"picking {color}: target ({tx:.0f},{ty:.0f}), grasp TCP z={grasp_z}")
-            step = "?"
-            try:
-                step = "open";   await gripper_open(gripper)
-                step = "hover";  await move_to(robot, tx, ty, grasp_z + HOVER_MM, "hover")
-                step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
-                step = "grab";   got = await gripper_grab(gripper)
-                step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
-                print(json.dumps({"picked": color, "grab_ack": bool(got)}))
-            except Exception as e:
-                msg = str(e)
-                print(json.dumps({"pick_failed_at": step, "error": msg[:160]}))
-                if "overcurrent" in msg or "collision" in msg:
-                    print("collision stop — arm needs: python calibrate.py clear, then retreat manually or rerun")
-                else:
-                    print("retreating to safe height...")
-                    try:
-                        await move_to(robot, tx, ty, REFINE_TCP_Z, "retreat")
-                    except Exception:
-                        print("  (retreat also failed — clear error and jog from CONTROL tab)")
+        elif cmd == "sort":
+            print(f"SORT: {SORT_TARGETS} (buffer: middle, tol {SORTED_TOL_MM}mm)")
+            await go_home(robot)
+            for color, slot in SORT_TARGETS.items():
+                found = await blocks_of_color(robot, color)
+                if not found:
+                    print(f"[sort] no {color} visible — skipping"); continue
+                b = found[0]
+                sx, sy = SLOTS[slot]
+                if abs(b["x"] - sx) <= SORTED_TOL_MM and abs(b["y"] - sy) <= SORTED_TOL_MM:
+                    print(f"[sort] {color} already at {slot} — skipping"); continue
+                print(f"[sort] {color} at ({b['x']},{b['y']}) -> {slot}")
+                if not await pick_color(robot, gripper, color):
+                    print(f"[sort] pick {color} failed — stopping sort"); break
+                await place_slot(robot, gripper, slot)
+                await go_home(robot)
+            print("[sort] done")
 
         elif cmd == "place":
             slot = args[1] if len(args) > 1 else "middle"
             if slot not in SLOTS:
                 print(f"unknown slot '{slot}' (have: {list(SLOTS)})"); return
-            x, y = SLOTS[slot]
-            cal = load_calibration()
-            release_z = cal["grasp_tcp_z"] + 30  # release ~3cm up: gentle drop beats a
-                                                 # computed landing when grip depth varies
-            print(f"placing at {slot} ({x},{y}), release TCP z={release_z}")
-            await move_to(robot, x, y, release_z + HOVER_MM, "hover")
-            await move_to(robot, x, y, release_z, "lower", straight=True)
-            await gripper_open(gripper)
-            await move_to(robot, x, y, release_z + LIFT_MM, "retreat", straight=True)
-            print(json.dumps({"placed": slot}))
+            await place_slot(robot, gripper, slot)
 
         elif cmd == "home":
             await go_home(robot)
