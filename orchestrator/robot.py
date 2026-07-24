@@ -214,7 +214,26 @@ async def main():
                 step = "open";   await gripper_call(gripper.open)
                 step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
                 step = "grab";   got = await gripper_call(gripper.grab)
-                await wait_gripper_done(gripper)
+                # jaws can start closing late (module queues behind arm motion);
+                # wait for an actual reported hold, not a timer
+                held = None
+                for i in range(16):
+                    await asyncio.sleep(0.5)
+                    try:
+                        status = await gripper.is_holding_something()
+                        if status.is_holding_something:
+                            print(f"  (hold confirmed after {0.5*(i+1):.1f}s)")
+                            held = True
+                            break
+                    except Exception:
+                        # holding status unsupported: re-issue grab; it serializes
+                        # behind the first close, so returning means jaws are done
+                        print("  (is_holding_something unsupported; re-issuing grab to serialize)")
+                        got = await gripper_call(gripper.grab) or got
+                        await asyncio.sleep(1.0)
+                        break
+                if held is None:
+                    print("  (no hold reported after 8s — lifting anyway, check the jaws)")
                 step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
                 print(json.dumps({"picked": color, "grab_ack": bool(got)}))
             except Exception as e:
