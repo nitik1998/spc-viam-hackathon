@@ -90,8 +90,29 @@ async def gripper_call(fn):
         return await fn(timeout=GRIPPER_TIMEOUT)
     except Exception as e:
         print(f"  (gripper ack late, continuing: {str(e)[:60]})")
-        await asyncio.sleep(2)
         return None
+
+
+async def wait_gripper_done(gripper, max_s=8.0, fallback_s=3.5):
+    """Block until the jaws stop moving. The ufactory module acks before motion
+    completes, so poll is_moving(); if it never reports motion, use a fixed wait."""
+    saw_motion = False
+    waited = 0.0
+    while waited < max_s:
+        try:
+            moving = await gripper.is_moving()
+        except Exception:
+            break  # is_moving unsupported -> fixed wait below
+        if moving:
+            saw_motion = True
+        elif saw_motion:
+            print(f"  (jaws settled after {waited:.1f}s)")
+            return
+        await asyncio.sleep(0.25)
+        waited += 0.25
+    if not saw_motion:
+        print(f"  (is_moving not reported; fixed {fallback_s}s settle)")
+        await asyncio.sleep(fallback_s)
 
 
 async def blocks_of_color(robot, color):
@@ -193,7 +214,7 @@ async def main():
                 step = "open";   await gripper_call(gripper.open)
                 step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
                 step = "grab";   got = await gripper_call(gripper.grab)
-                await asyncio.sleep(2.0)   # let the jaws finish closing before any motion
+                await wait_gripper_done(gripper)
                 step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
                 print(json.dumps({"picked": color, "grab_ack": bool(got)}))
             except Exception as e:
@@ -219,6 +240,7 @@ async def main():
             await move_to(robot, x, y, release_z + HOVER_MM, "hover")
             await move_to(robot, x, y, release_z, "lower", straight=True)
             await gripper_call(gripper.open)
+            await wait_gripper_done(gripper, fallback_s=2.0)
             await move_to(robot, x, y, release_z + LIFT_MM, "retreat", straight=True)
             print(json.dumps({"placed": slot}))
 
