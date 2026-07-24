@@ -257,7 +257,8 @@ async def main():
                 print(f"unknown slot '{slot}' (have: {list(SLOTS)})"); return
             x, y = SLOTS[slot]
             cal = load_calibration()
-            release_z = cal["grasp_tcp_z"] + 5   # release just above grasp height
+            release_z = cal["grasp_tcp_z"] + 30  # release ~3cm up: gentle drop beats a
+                                                 # computed landing when grip depth varies
             print(f"placing at {slot} ({x},{y}), release TCP z={release_z}")
             await move_to(robot, x, y, release_z + HOVER_MM, "hover")
             await move_to(robot, x, y, release_z, "lower", straight=True)
