@@ -42,6 +42,7 @@ HOVER_MM = 100
 LIFT_MM = 120
 PLACE_Z = 8.0        # block-center height when releasing (just above table)
 GRIPPER_TIMEOUT = 15
+GRIPPER_SETTLE_S = 3.0   # cover for the deployed module returning before jaws finish
 
 # workspace safety bounds (world mm) — refuse any motion target outside these
 X_RANGE = (-350, 350)
@@ -85,37 +86,26 @@ def in_bounds(x, y, z):
     return X_RANGE[0] <= x <= X_RANGE[1] and Y_RANGE[0] <= y <= Y_RANGE[1] and Z_RANGE[0] <= z <= Z_RANGE[1]
 
 
-GRIPPER_OPEN_POS = 840.0
-GRIPPER_CLOSED_POS = 2.0
+async def gripper_open(gripper):
+    """Documented Gripper API: Open. Deployed module may return before the jaws
+    finish (fixed upstream, unreleased) — one settle pause covers the gap."""
+    try:
+        await gripper.open(timeout=GRIPPER_TIMEOUT)
+    except Exception as e:
+        print(f"  (open returned early: {str(e)[:60]})")
+    await asyncio.sleep(GRIPPER_SETTLE_S)
 
 
-async def gripper_goto(arm, goal, max_s=10.0):
-    """Command jaws via the arm's DoCommand and block until they truly stop:
-    reached goal, or position stable >1s (= gripping an object). Mirrors the
-    fixed (unreleased) module logic; deployed wrapper errors out at 2s."""
-    await arm.do_command({"setup_gripper": True, "move_gripper": float(goal)})
-    old, stuck_ms, waited = None, 0, 0.0
-    while waited < max_s:
-        await asyncio.sleep(0.1); waited += 0.1
-        res = await arm.do_command({"get_gripper": True})
-        pos = res.get("gripper_position")
-        if pos is None:
-            print("  (get_gripper returned no position; falling back to 4s wait)")
-            await asyncio.sleep(4.0)
-            return None
-        if abs(pos - goal) <= 6:
-            print(f"  (jaws at goal {goal:.0f} after {waited:.1f}s)")
-            return pos
-        if old is not None and abs(pos - old) <= 1:
-            stuck_ms += 100
-            if stuck_ms > 1000:
-                print(f"  (jaws stalled at {pos:.0f} after {waited:.1f}s — object gripped?)")
-                return pos
-        else:
-            stuck_ms = 0
-        old = pos
-    print(f"  (jaws still moving after {max_s}s, pos={pos:.0f})")
-    return pos
+async def gripper_grab(gripper):
+    """Documented Gripper API: Grab — 'closes until it grabs something or closes
+    completely' (blocking per docs; deployed module returns early)."""
+    try:
+        got = await gripper.grab(timeout=GRIPPER_TIMEOUT)
+    except Exception as e:
+        print(f"  (grab returned early: {str(e)[:60]})")
+        got = None
+    await asyncio.sleep(GRIPPER_SETTLE_S)
+    return got
 
 
 async def gripper_call(fn):
@@ -243,13 +233,10 @@ async def main():
             print(f"picking {color}: target ({tx:.0f},{ty:.0f}), grasp TCP z={grasp_z}")
             step = "?"
             try:
-                arm = Arm.from_robot(robot, "arm-1")
-                step = "open";   await gripper_goto(arm, GRIPPER_OPEN_POS)
+                step = "open";   await gripper_open(gripper)
                 step = "hover";  await move_to(robot, tx, ty, grasp_z + HOVER_MM, "hover")
                 step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
-                step = "grab"
-                endpos = await gripper_goto(arm, GRIPPER_CLOSED_POS)
-                got = endpos is not None and endpos > 15  # jaws stalled well above closed = holding
+                step = "grab";   got = await gripper_grab(gripper)
                 step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
                 print(json.dumps({"picked": color, "grab_ack": bool(got)}))
             except Exception as e:
@@ -274,8 +261,7 @@ async def main():
             print(f"placing at {slot} ({x},{y}), release TCP z={release_z}")
             await move_to(robot, x, y, release_z + HOVER_MM, "hover")
             await move_to(robot, x, y, release_z, "lower", straight=True)
-            arm = Arm.from_robot(robot, "arm-1")
-            await gripper_goto(arm, GRIPPER_OPEN_POS)
+            await gripper_open(gripper)
             await move_to(robot, x, y, release_z + LIFT_MM, "retreat", straight=True)
             print(json.dumps({"placed": slot}))
 
@@ -284,8 +270,7 @@ async def main():
             print("at home")
 
         elif cmd == "drop":
-            arm = Arm.from_robot(robot, "arm-1")
-            await gripper_goto(arm, GRIPPER_OPEN_POS)
+            await gripper_open(gripper)
             print("dropped")
 
         elif cmd == "status":
