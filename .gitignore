@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+
+# machine config dumps (contain org/part identifiers; pulled at runtime)
+current_config.json
+backup_config.json
+new_config.json
