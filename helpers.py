@@ -9,7 +9,8 @@ from viam.services.generic import Generic as GenericService
 from viam.services.mlmodel import MLModelClient
 from viam.services.vision import VisionClient
 
-KEY_FILE = os.path.expanduser("~/api-key.json")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+KEY_FILE = os.path.join(BASE_DIR, 'api-key.json')
 
 async def connect() -> RobotClient:
     """Connect to your machine with your API key and return a client."""
