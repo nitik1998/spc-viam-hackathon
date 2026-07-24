@@ -1,2 +1,0 @@
-viam-sdk>=0.79
-python-dotenv>=1.0
