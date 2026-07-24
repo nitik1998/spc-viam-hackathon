@@ -1,4 +1,3 @@
-import asyncio
 import json
 import os
 
@@ -71,6 +70,3 @@ async def main():
         object_detector = VisionClient.from_robot(machine, "object-detector")
         object_detector_return_value = await object_detector.get_properties()
         print(f"object-detector get_properties return value: {object_detector_return_value}")
-
-if __name__ == '__main__':
-    asyncio.run(main())
