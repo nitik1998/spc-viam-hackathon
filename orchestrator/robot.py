@@ -99,16 +99,44 @@ async def gripper_open(gripper):
     await asyncio.sleep(GRIPPER_SETTLE_S)
 
 
+async def jaw_position(gripper):
+    """Module-documented DoCommand: {"get": true} -> current jaw position
+    (840 = fully open, ~2 = fully closed). None if unsupported."""
+    try:
+        res = await gripper.do_command({"get": True})
+        return res.get("pos")
+    except Exception:
+        return None
+
+
 async def gripper_grab(gripper):
-    """Documented Gripper API: Grab — 'closes until it grabs something or closes
-    completely' (blocking per docs; deployed module returns early)."""
+    """Grab, then VERIFY with a jaw-position readback before trusting it.
+    The deployed module can report success while the jaws haven't moved."""
     try:
         got = await gripper.grab(timeout=GRIPPER_TIMEOUT)
     except Exception as e:
         print(f"  (grab returned early: {str(e)[:60]})")
         got = None
     await asyncio.sleep(GRIPPER_SETTLE_S)
-    return got
+
+    pos = await jaw_position(gripper)
+    if pos is None:
+        print("  (no jaw readback available; trusting grab ack)")
+        return got
+    if pos > 800:                      # still open: close never executed
+        print(f"  (jaws still open at {pos:.0f} — re-issuing grab)")
+        try:
+            got = await gripper.grab(timeout=GRIPPER_TIMEOUT)
+        except Exception as e:
+            print(f"  (retry grab returned early: {str(e)[:60]})")
+        await asyncio.sleep(GRIPPER_SETTLE_S)
+        pos = await jaw_position(gripper)
+    if pos is not None and pos <= 30:  # fully closed = nothing between the fingers
+        print(f"  (jaws fully closed at {pos:.0f} — grabbed air)")
+        return False
+    if pos is not None:
+        print(f"  (verified hold: jaws at {pos:.0f})")
+    return True
 
 
 async def gripper_call(fn):
