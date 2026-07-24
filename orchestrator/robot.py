@@ -30,11 +30,11 @@ EDGE_MARGIN = 15          # px; a box touching the border means the block is par
 REFINE_TCP_Z = 250        # safe altitude for the re-detect pass (camera stays beyond RealSense min depth)
 COLOR_SEGMENTERS = {
     "red": "object-segmenter",
-    "yellow": "yellow-object-segmenter",
+    "blue": "blue-object-segmenter",
 }
 COLOR_DETECTORS = {
     "red": "color-detector",
-    "yellow": "yellow-color-detector",
+    "blue": "blue-color-detector",
 }
 HOME_FILE = "home_joints.json"
 TABLE_Z = -10.0
