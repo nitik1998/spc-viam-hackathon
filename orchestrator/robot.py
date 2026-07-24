@@ -99,129 +99,16 @@ async def gripper_open(gripper):
     await asyncio.sleep(GRIPPER_SETTLE_S)
 
 
-GRIPPER_OPEN_POS = 840.0
-GRIPPER_CLOSED_POS = 2.0
-
-
-async def gripper_goto(robot, goal, max_s=10.0):
-    """THE PATH THAT PHYSICALLY WORKS: command jaws via the arm's DoCommand
-    (move_gripper) and poll position until at-goal or stalled-after-moving.
-    The Gripper API wrapper (grab/open) returns success without moving jaws."""
-    arm = Arm.from_robot(robot, "arm-1")
-    await arm.do_command({"setup_gripper": True, "move_gripper": float(goal)})
-    start_pos, old, stuck_ms, waited = None, None, 0, 0.0
-    pos = None
-    while waited < max_s:
-        await asyncio.sleep(0.1); waited += 0.1
-        res = await arm.do_command({"get_gripper": True})
-        pos = res.get("gripper_position")
-        if pos is None:
-            print("  (no position readback; 4s blind wait)")
-            await asyncio.sleep(4.0)
-            return None
-        if start_pos is None:
-            start_pos = pos
-        if abs(pos - goal) <= 6:
-            print(f"  (jaws at goal {goal:.0f} after {waited:.1f}s)")
-            return pos
-        moved = abs(pos - start_pos) > 30
-        if moved and old is not None and abs(pos - old) <= 1:
-            stuck_ms += 100
-            if stuck_ms > 1000:
-                print(f"  (jaws moved {start_pos:.0f}->{pos:.0f}, stalled — object gripped)")
-                return pos
-        else:
-            stuck_ms = 0
-        old = pos
-    print(f"  (TIMEOUT {max_s}s: jaws at {pos:.0f} — close {'never started' if start_pos is not None and abs(pos-start_pos)<=30 else 'incomplete'})")
-    return pos
-
-
-async def gripper_open(robot_or_gripper, gripper=None):
-    robot = robot_or_gripper
-    await gripper_goto(robot, GRIPPER_OPEN_POS)
-
-
-async def gripper_grab(robot):
-    pos = await gripper_goto(robot, GRIPPER_CLOSED_POS)
-    if pos is None:
-        return None
-    if pos > 800:
-        print(f"  (jaws never closed, still at {pos:.0f})")
-        return False
-    if pos <= 30:
-        print(f"  (jaws fully closed at {pos:.0f} — grabbed air)")
-        return False
-    return True
-
-
-def load_env(path=".env"):
-    with open(path) as f:
-        for line in f:
-            if "=" in line:
-                k, v = line.strip().split("=", 1)
-                os.environ.setdefault(k, v)
-
-
-async def connect():
-    load_env()
-    opts = RobotClient.Options.with_api_key(
-        api_key=os.environ["VIAM_API_KEY"], api_key_id=os.environ["VIAM_API_KEY_ID"])
-    return await RobotClient.at_address(os.environ["VIAM_ADDRESS"], opts)
-
-
-def in_bounds(x, y, z):
-    return X_RANGE[0] <= x <= X_RANGE[1] and Y_RANGE[0] <= y <= Y_RANGE[1] and Z_RANGE[0] <= z <= Z_RANGE[1]
-
-
-async def gripper_open(gripper):
-    """Documented Gripper API: Open. Deployed module may return before the jaws
-    finish (fixed upstream, unreleased) — one settle pause covers the gap."""
-    try:
-        await gripper.open(timeout=GRIPPER_TIMEOUT)
-    except Exception as e:
-        print(f"  (open returned early: {str(e)[:60]})")
-    await asyncio.sleep(GRIPPER_SETTLE_S)
-
-
-async def jaw_position(gripper):
-    """Module-documented DoCommand: {"get": true} -> current jaw position
-    (840 = fully open, ~2 = fully closed). None if unsupported."""
-    try:
-        res = await gripper.do_command({"get": True})
-        return res.get("pos")
-    except Exception:
-        return None
-
-
 async def gripper_grab(gripper):
-    """Grab, then VERIFY with a jaw-position readback before trusting it.
-    The deployed module can report success while the jaws haven't moved."""
+    """Documented Gripper API: Grab — 'closes until it grabs something or closes
+    completely' (blocking per docs; deployed module returns early)."""
     try:
         got = await gripper.grab(timeout=GRIPPER_TIMEOUT)
     except Exception as e:
         print(f"  (grab returned early: {str(e)[:60]})")
         got = None
     await asyncio.sleep(GRIPPER_SETTLE_S)
-
-    pos = await jaw_position(gripper)
-    if pos is None:
-        print("  (no jaw readback available; trusting grab ack)")
-        return got
-    if pos > 800:                      # still open: close never executed
-        print(f"  (jaws still open at {pos:.0f} — re-issuing grab)")
-        try:
-            got = await gripper.grab(timeout=GRIPPER_TIMEOUT)
-        except Exception as e:
-            print(f"  (retry grab returned early: {str(e)[:60]})")
-        await asyncio.sleep(GRIPPER_SETTLE_S)
-        pos = await jaw_position(gripper)
-    if pos is not None and pos <= 30:  # fully closed = nothing between the fingers
-        print(f"  (jaws fully closed at {pos:.0f} — grabbed air)")
-        return False
-    if pos is not None:
-        print(f"  (verified hold: jaws at {pos:.0f})")
-    return True
+    return got
 
 
 async def gripper_call(fn):
@@ -332,10 +219,10 @@ async def pick_color(robot, gripper, color):
     print(f"picking {color}: target ({tx:.0f},{ty:.0f}), grasp TCP z={grasp_z}")
     step = "?"
     try:
-        step = "open";   await gripper_open(robot)
+        step = "open";   await gripper_open(gripper)
         step = "hover";  await move_to(robot, tx, ty, grasp_z + HOVER_MM, "hover")
         step = "grasp";  await move_to(robot, tx, ty, grasp_z, "grasp", straight=True)
-        step = "grab";   got = await gripper_grab(robot)
+        step = "grab";   got = await gripper_grab(gripper)
         step = "lift";   await move_to(robot, tx, ty, grasp_z + LIFT_MM, "lift", straight=True)
         print(json.dumps({"picked": color, "grab_ack": bool(got)}))
         return True
@@ -361,7 +248,7 @@ async def place_slot(robot, gripper, slot):
     print(f"placing at {slot} ({x},{y}), release TCP z={release_z}")
     await move_to(robot, x, y, release_z + HOVER_MM, "hover")
     await move_to(robot, x, y, release_z, "lower", straight=True)
-    await gripper_open(robot)
+    await gripper_open(gripper)
     await move_to(robot, x, y, release_z + LIFT_MM, "retreat", straight=True)
     print(json.dumps({"placed": slot}))
 
@@ -413,7 +300,7 @@ async def main():
             print("at home")
 
         elif cmd == "drop":
-            await gripper_open(robot)
+            await gripper_open(gripper)
             print("dropped")
 
         elif cmd == "status":
